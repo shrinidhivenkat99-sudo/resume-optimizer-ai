@@ -1,82 +1,126 @@
+import fitz  # PyMuPDF
 import streamlit as st
 import google.generativeai as genai
-import io
 import os
-from PyPDF2 import PdfReader
-from docx import Document
-from reportlab.platypus import SimpleDocTemplate, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
+import io
+import toml 
+with open('.streamlit\secrets.toml', 'r') as f:
+        config = toml.load(f)
+# Configure Gemini
+genai.configure(api_key=config["GEMINI_API_KEY"])
 
-# Configure Gemini API key (from environment variable or secrets.toml)
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# ----------- Helper Functions ------------
-def extract_text_from_pdf(uploaded_file):
-    pdf = PdfReader(uploaded_file)
+# ---------- Extract text from PDF ----------
+def extract_text_from_pdf(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     text = ""
-    for page in pdf.pages:
-        text += page.extract_text() + "\n"
+    for page in doc:
+        text += page.get_text("text") + "\n"
     return text
 
-def extract_text_from_docx(uploaded_file):
-    doc = Document(uploaded_file)
-    return "\n".join([para.text for para in doc.paragraphs])
-
-def generate_corrected_resume(resume_text, job_desc):
+# ---------- AI Suggestion ----------
+def optimize_resume(resume_text, job_desc):
     prompt = f"""
     You are an expert resume writer.
-    Here is a job description:
+    Job description:
     {job_desc}
 
-    Here is the candidate's resume:
+    Resume text:
     {resume_text}
 
-    Rewrite and improve the resume so it best matches the job description 
-    while keeping honesty and factual accuracy. Return the full corrected resume.
+    Please rewrite and improve the resume to best match the job description while maintaining honesty and factual accuracy.
+   
+    FORMAT REQUIREMENTS - Follow this EXACT structure:
+   
+    1. HEADER SECTION:
+    - Full Name (centered, larger font)
+    - Phone Number | Email Address | LinkedIn Profile | Location
+    - Professional headline/title
+   
+    2. PROFESSIONAL SUMMARY:
+    - 3-4 line compelling summary highlighting key qualifications
+    - Include relevant years of experience and key skills
+   
+    3. CORE COMPETENCIES/SKILLS:
+    - List 8-12 relevant technical and soft skills
+    - Organize in bullet points or comma-separated format
+   
+    4. PROFESSIONAL EXPERIENCE:
+    - List in reverse chronological order
+    - Company Name, Job Title, Location, Dates
+    - 3-5 bullet points per role using action verbs
+    - Quantify achievements with numbers/percentages where possible
+    - Highlight accomplishments relevant to the target job
+   
+    5. EDUCATION:
+    - Degree, Institution, Location, Graduation Date
+    - Include relevant coursework, honors, or GPA if impressive
+   
+    6. ADDITIONAL SECTIONS (if applicable):
+    - Certifications
+    - Projects
+    - Awards/Achievements
+    - Publications
+    - Languages
+   
+    OPTIMIZATION GUIDELINES:
+    - Use keywords from the job description naturally throughout
+    - Start bullet points with strong action verbs
+    - Focus on achievements, not just job duties
+    - Keep it concise but comprehensive (1-2 pages)
+    - Use consistent formatting and professional language
+    - Tailor the content to match the specific role requirements
+   
+    Return the complete optimized resume in the specified format.
     """
     model = genai.GenerativeModel("gemini-1.5-flash")
     response = model.generate_content(prompt)
-    return response.text
+    return response.text.strip()
 
-def save_resume_to_pdf(resume_text):
+# ---------- Overlay text onto original PDF ----------
+def overlay_text_on_pdf(original_pdf_bytes, updated_text):
+    # Open original PDF
+    doc = fitz.open(stream=original_pdf_bytes, filetype="pdf")
+
+    # Remove old text (optional, comment out if you want to overlay only)
+    for page in doc:
+        page.clean_contents()  # WARNING: this wipes text but keeps graphics/images
+
+    # Now overlay updated text (simple version: one block per page)
+    for i, page in enumerate(doc):
+        rect = fitz.Rect(50, 50, 550, 800)  # adjust placement box
+        page.insert_textbox(rect, updated_text,
+                            fontsize=10,
+                            fontname="helv",
+                            color=(0, 0, 0),
+                            align=0)
+
+    # Save updated PDF into memory
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer)
-    styles = getSampleStyleSheet()
-    story = [Paragraph(line, styles["Normal"]) for line in resume_text.split("\n") if line.strip()]
-    doc.build(story)
-    buffer.seek(0)  # rewind to start
+    doc.save(buffer)
+    buffer.seek(0)
     return buffer
 
-# ----------- Streamlit UI ------------
-st.title("AI Resume Optimizer (Gemini API)")
+# ---------- Streamlit App ----------
+st.title("📄 AI Resume Optimizer (Preserve PDF Design)")
 
-uploaded_resume = st.file_uploader("Upload your Resume (PDF or DOCX)", type=["pdf", "docx"])
-job_desc = st.text_area("Paste the Job Description")
+uploaded_resume = st.file_uploader("Upload Resume (PDF only)", type=["pdf"])
+job_desc = st.text_area("Paste Job Description", height=200)
 
 if uploaded_resume and job_desc:
-    if st.button("Generate Optimized Resume"):
-        with st.spinner("Optimizing your resume..."):
+    if st.button("🔍 Optimize Resume"):
+        resume_text = extract_text_from_pdf(uploaded_resume.read())
+        optimized_text = optimize_resume(resume_text, job_desc)
 
-            # Extract resume text
-            if uploaded_resume.type == "application/pdf":
-                resume_text = extract_text_from_pdf(uploaded_resume)
-            elif uploaded_resume.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                resume_text = extract_text_from_docx(uploaded_resume)
-            else:
-                st.error("Unsupported file format")
-                st.stop()
+        st.subheader("Preview Optimized Resume Text")
+        st.text_area("", optimized_text, height=400)
 
-            # Generate corrected resume
-            corrected_resume = generate_corrected_resume(resume_text, job_desc)
+        # Overlay new text back onto original PDF
+        uploaded_resume.seek(0)  # reset pointer
+        final_pdf = overlay_text_on_pdf(uploaded_resume.read(), optimized_text)
 
-            # Save to PDF (in memory)
-            pdf_buffer = save_resume_to_pdf(corrected_resume)
-
-            # Show download button
-            st.success("Resume optimized successfully!")
-            st.download_button(
-                label="📥 Download Optimized Resume",
-                data=pdf_buffer,
-                file_name="optimized_resume.pdf",
-                mime="application/pdf"
-            )
+        st.download_button(
+            "📥 Download Optimized Resume (PDF with Original Style)",
+            data=final_pdf,
+            file_name="optimized_resume.pdf",
+            mime="application/pdf"
+        )

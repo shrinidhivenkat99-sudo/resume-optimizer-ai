@@ -3,3 +3,8 @@ google-generativeai
 PyPDF2
 python-docx
 reportlab
+beautifulsoup4
+requests
+pdf2docx
+PyMuPDF
+toml
